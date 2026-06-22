@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, FileText, CheckSquare, Settings, Users, LogOut } from 'lucide-react';
+import { LayoutDashboard, FileText, CheckSquare, Users } from 'lucide-react';
 
 export default function Sidebar() {
   return (
@@ -33,17 +33,6 @@ export default function Sidebar() {
           <Users size={18} />
           <span>Students</span>
         </a>
-        <a href="#" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-surface-600 hover:bg-surface-50 hover:text-surface-900 font-medium transition-colors">
-          <Settings size={18} />
-          <span>Settings</span>
-        </a>
-      </div>
-      
-      <div className="p-4 border-t border-surface-200">
-        <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-surface-600 hover:bg-surface-50 hover:text-surface-900 font-medium transition-colors">
-          <LogOut size={18} />
-          <span>Logout</span>
-        </button>
       </div>
     </aside>
   );
