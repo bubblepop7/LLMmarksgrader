@@ -19,6 +19,37 @@ class EvaluationPipeline:
     def __init__(self):
         self.model_name = "llama-3.3-70b-versatile"
 
+    async def extract_handwriting(self, image_base64: str) -> Optional[str]:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "llama-3.2-90b-vision-preview",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Transcribe the handwritten text in this image accurately. Do not add any extra commentary, just return the text."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                    ]
+                }
+            ],
+            "temperature": 0.1
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(GROQ_API_URL, json=payload, headers=headers, timeout=60.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    print(f"[Error] Groq Vision API returned status {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[Exception] Error communicating with Groq Vision API: {e}")
+        return None
+
     def compute_similarity(self, student_answer: str, reference_answer: str) -> float:
         """
         Compute cosine similarity using Sentence Transformers (all-MiniLM-L6-v2).
