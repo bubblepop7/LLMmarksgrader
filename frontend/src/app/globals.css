@@ -2,8 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+body {
+  @apply bg-surface-50 text-surface-800;
+}
+
 @layer utilities {
-  .glass-panel {
-    @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-xl rounded-2xl;
+  .card-shadow {
+    @apply bg-white shadow-sm border border-surface-200 rounded-xl;
   }
 }
