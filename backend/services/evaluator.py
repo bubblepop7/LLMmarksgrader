@@ -1,8 +1,11 @@
 import os
+import base64
+import asyncio
+import json
 from typing import List, Dict, Any, Optional
 import httpx
 from pydantic import ValidationError
-from ..models.schema import LLMGradingResponse, EvalStatus
+from models.schema import LLMGradingResponse, EvalStatus
 
 # Initialize local sentence-transformers (mocking loading if library not installed)
 try:
@@ -25,14 +28,19 @@ class EvaluationPipeline:
             "Content-Type": "application/json"
         }
         
+        if not image_base64.startswith("data:image/"):
+            image_url = f"data:image/jpeg;base64,{image_base64}"
+        else:
+            image_url = image_base64
+
         payload = {
-            "model": "llama-3.2-90b-vision-preview",
+            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Transcribe the handwritten text in this image accurately. Do not add any extra commentary, just return the text."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                        {"type": "text", "text": "Transcribe the handwritten text in this image accurately. Do not add any extra commentary, just return the text. If there is no text, return an empty string."},
+                        {"type": "image_url", "image_url": {"url": image_url}}
                     ]
                 }
             ],
@@ -49,6 +57,147 @@ class EvaluationPipeline:
         except Exception as e:
             print(f"[Exception] Error communicating with Groq Vision API: {e}")
         return None
+
+    async def extract_from_pdf_bytes(self, pdf_bytes: bytes) -> List[str]:
+        """
+        Converts each page of a PDF file to a JPEG image in-memory using PyMuPDF (fitz)
+        and transcribes them.
+        """
+        try:
+            import fitz
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            transcriptions = []
+            tasks = []
+            for page in doc:
+                pix = page.get_pixmap(dpi=150)  # Render page at 150 DPI
+                img_data = pix.tobytes("jpeg")
+                b64_str = base64.b64encode(img_data).decode("utf-8")
+                tasks.append(self.extract_handwriting(b64_str))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception):
+                    print(f"[Error] Transcription page task failed: {res}")
+                    transcriptions.append("")
+                elif res:
+                    transcriptions.append(res)
+                else:
+                    transcriptions.append("")
+            
+            return transcriptions
+        except Exception as e:
+            print(f"[Exception] Error in extract_from_pdf_bytes: {e}")
+            return []
+
+    async def parse_marking_scheme(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Calls Llama-3.3-70b-versatile to extract structured question, rubric, reference answers
+        from the marking scheme text.
+        """
+        system_prompt = (
+            "You are an expert curriculum examiner. Extract the structured marking scheme from the provided text.\n"
+            "Format the output as a valid JSON array of questions, where each question matches this JSON structure:\n"
+            "[\n"
+            "  {\n"
+            '    "question_id": "Q1",\n'
+            '    "total_marks": 5.0,\n'
+            '    "reference_answer": "Complete reference answer text...",\n'
+            '    "criteria": [\n'
+            '      {"name": "Criterion Name", "max_marks": 2.0, "description": "Description of what to look for"}\n'
+            "    ]\n"
+            "  }\n"
+            "]\n"
+            "Ensure the total marks of the question matches the sum of the maximum marks of its criteria. Only return a valid JSON array."
+        )
+        
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            "response_format": {"type": "json_object"} if "llama-3.3" in self.model_name else None,
+            "temperature": 0.1
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(GROQ_API_URL, json=payload, headers=headers, timeout=30.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if content.startswith("```json"):
+                        content = content.replace("```json", "", 1)
+                    if content.endswith("```"):
+                        content = content[:-3]
+                    content = content.strip()
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict) and "questions" in parsed:
+                        return parsed["questions"]
+                    elif isinstance(parsed, dict) and "marking_scheme" in parsed:
+                        return parsed["marking_scheme"]
+                    elif isinstance(parsed, list):
+                        return parsed
+                    else:
+                        return [parsed]
+                else:
+                    print(f"[Error] parse_marking_scheme returned status {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[Exception] Error parsing marking scheme: {e}")
+        return []
+
+    async def segment_student_answers(self, text: str, question_ids: List[str]) -> Dict[str, str]:
+        """
+        Calls Llama-3.3-70b-versatile to segment consolidated transcribed student answers by question ID.
+        """
+        system_prompt = (
+            "You are an assistant that processes handwritten student exam paper transcriptions.\n"
+            "Given the full transcription of the student's exam paper and the list of question IDs, "
+            "segment and extract the student's answer for each question.\n"
+            "Format the output as a valid JSON object where keys are the question IDs (e.g. 'Q1', 'Q2') "
+            "and values are the extracted answer text written by the student. If a question is not answered, return an empty string.\n"
+            "Only return the JSON object."
+        )
+        
+        user_prompt = f"Question IDs: {question_ids}\n\nStudent Exam Paper Transcription:\n{text}"
+        
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "response_format": {"type": "json_object"} if "llama-3.3" in self.model_name else None,
+            "temperature": 0.1
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(GROQ_API_URL, json=payload, headers=headers, timeout=30.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if content.startswith("```json"):
+                        content = content.replace("```json", "", 1)
+                    if content.endswith("```"):
+                        content = content[:-3]
+                    return json.loads(content.strip())
+                else:
+                    print(f"[Error] segment_student_answers returned status {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[Exception] Error segmenting student answers: {e}")
+        return {}
+
 
     def compute_similarity(self, student_answer: str, reference_answer: str) -> float:
         """
